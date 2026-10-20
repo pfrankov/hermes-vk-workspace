@@ -85,6 +85,83 @@ class Incoming:
     context: str | None = None
 
 
+def _parent_chat_id(payload: dict, chat_id: str, chat_type: str) -> str | None:
+    """Accept a thread only with a distinct group parent and a valid root message."""
+    if "parent_topic" not in payload:
+        return None
+    parent = payload["parent_topic"]
+    if not isinstance(parent, dict) or chat_type == "dm":
+        raise ValueError("invalid thread parent")
+    parent_id = _id(parent.get("chatId"))
+    if not parent_id or parent_id == chat_id or not _id(parent.get("messageId")):
+        raise ValueError("invalid thread parent")
+    return parent_id
+
+
+def _direct_text(payload: dict, parts: list[dict]) -> str:
+    """Use direct text or file captions as instructions, with one combined byte limit."""
+    text = _input_text(payload.get("text"))
+    if text.strip():
+        return text
+    captions = []
+    size = 0
+    for part in parts:
+        if part.get("type") != "file":
+            continue
+        caption = _input_text(part["payload"].get("caption"))
+        size += len(caption.encode("utf-8")) + bool(captions)
+        if size > MAX_INPUT_TEXT:
+            raise ValueError("message captions are too large")
+        captions.append(caption)
+    return "\n".join(captions).strip()
+
+
+def _attachments(parts: list[dict]) -> tuple[Attachment, ...]:
+    """Admit only direct files, keeping the first kind for each bounded file ID."""
+    files: dict[str, Attachment] = {}
+    for part in parts:
+        file_id = _id(part["payload"].get("fileId"))
+        kind = part.get("type")
+        if kind not in ("file", "voice", "sticker") or not file_id or file_id in files:
+            continue
+        if kind == "file":
+            declared = part["payload"].get("type")
+            kind = declared if declared in ("image", "audio", "video") else "file"
+        files[file_id] = Attachment(file_id, kind)
+        if len(files) > MAX_ATTACHMENTS:
+            raise ValueError("too many message attachments")
+    return tuple(files.values())
+
+
+def _forward_context(parts: list[dict]) -> str | None:
+    """Quote a bounded preview without promoting nested mentions, commands, or files."""
+    forwards = []
+    for part in parts:
+        nested = part["payload"].get("message")
+        if part.get("type") != "forward" or not isinstance(nested, dict):
+            continue
+        author = nested.get("from") if isinstance(nested.get("from"), dict) else {}
+        body = _text(nested.get("text"), 3000)
+        if body:
+            quoted = "\n".join("> " + line for line in body.splitlines())
+            forwards.append(
+                f"Forwarded message from {_name(author) or 'unknown sender'}:\n{quoted}"
+            )
+        if len(forwards) == 5:
+            break
+    return "\n\n".join(forwards)[:MAX_CONTEXT] or None
+
+
+def _timestamp(value: Any) -> datetime:
+    """Use receipt time when the provider timestamp cannot be represented."""
+    try:
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return datetime.fromtimestamp(value, UTC)
+    except OverflowError, ValueError, OSError:
+        pass
+    return datetime.now(UTC)
+
+
 def parse_message(event: dict, self_id: str) -> Incoming | None:
     if not isinstance(event, dict) or event.get("type") != "newMessage":
         return None
@@ -106,32 +183,14 @@ def parse_message(event: dict, self_id: str) -> Incoming | None:
         return None
     if sender_id == self_id or sender.get("isBot", False) is not False:
         return None
-    parent_id = None
-    if "parent_topic" in payload:
-        parent = payload["parent_topic"]
-        if not isinstance(parent, dict) or chat_type == "dm":
-            return None
-        parent_id = _id(parent.get("chatId"))
-        if not parent_id or parent_id == chat_id or not _id(parent.get("messageId")):
-            return None
     raw_parts = payload.get("parts", [])
     if not isinstance(raw_parts, list) or len(raw_parts) > MAX_PARTS:
         return None
     parts = [p for p in raw_parts if isinstance(p, dict) and isinstance(p.get("payload"), dict)]
     try:
-        text = _input_text(payload.get("text"))
-        if not text.strip():
-            captions = []
-            size = 0
-            for part in parts:
-                if part.get("type") != "file":
-                    continue
-                caption = _input_text(part["payload"].get("caption"))
-                size += len(caption.encode("utf-8")) + bool(captions)
-                if size > MAX_INPUT_TEXT:
-                    return None
-                captions.append(caption)
-            text = "\n".join(captions).strip()
+        parent_id = _parent_chat_id(payload, chat_id, chat_type)
+        text = _direct_text(payload, parts)
+        attachments = _attachments(parts)
     except ValueError:
         return None
     reply = next(
@@ -154,71 +213,29 @@ def parse_message(event: dict, self_id: str) -> Incoming | None:
         )
     )
     text = text.replace(f"@[{self_id}]", "").strip()
-    attachments = []
-    seen_files = set()
-    for part in parts:
-        file_id = _id(part["payload"].get("fileId"))
-        if part.get("type") not in ("file", "voice", "sticker") or not file_id:
-            continue
-        declared = part["payload"].get("type")
-        kind = (
-            part["type"]
-            if part["type"] != "file"
-            else declared
-            if declared in ("image", "audio", "video")
-            else "file"
-        )
-        if file_id not in seen_files:
-            seen_files.add(file_id)
-            attachments.append(Attachment(file_id, kind))
-            if len(attachments) > MAX_ATTACHMENTS:
-                return None
-    forwards = []
-    for part in parts:
-        nested = part["payload"].get("message")
-        if part.get("type") != "forward" or not isinstance(nested, dict):
-            continue
-        author = nested.get("from") if isinstance(nested.get("from"), dict) else {}
-        body = _text(nested.get("text"), 3000)
-        if body:
-            quoted = "\n".join("> " + line for line in body.splitlines())
-            forwards.append(
-                f"Forwarded message from {_name(author) or 'unknown sender'}:\n{quoted}"
-            )
-        if len(forwards) == 5:
-            break
-    context = "\n\n".join(forwards)[:MAX_CONTEXT] or None
+    context = _forward_context(parts)
     if not text and not attachments and not context and not reply_id:
         return None
     if not text:
         text = "[Attachment]" if attachments else "[Shared message]"
-    raw_time = payload.get("timestamp")
-    try:
-        timestamp = (
-            datetime.fromtimestamp(raw_time, UTC)
-            if isinstance(raw_time, (int, float)) and not isinstance(raw_time, bool)
-            else datetime.now(UTC)
-        )
-    except OverflowError, ValueError, OSError:
-        timestamp = datetime.now(UTC)
     return Incoming(
-        chat_id,
-        chat_type,
-        _text(chat.get("title"), 256),
-        sender_id,
-        _name(sender),
-        msg_id,
-        text,
-        timestamp,
-        mentioned,
-        tuple(attachments),
-        parent_id,
-        reply_id,
-        _text(reply.get("text"), MAX_CONTEXT) or None,
-        reply_author,
-        _name(reply_from) or None,
-        reply_is_own,
-        context,
+        chat_id=chat_id,
+        chat_type=chat_type,
+        chat_name=_text(chat.get("title"), 256),
+        sender_id=sender_id,
+        sender_name=_name(sender),
+        message_id=msg_id,
+        text=text,
+        timestamp=_timestamp(payload.get("timestamp")),
+        mentioned=mentioned,
+        attachments=attachments,
+        parent_chat_id=parent_id,
+        reply_id=reply_id,
+        reply_text=_text(reply.get("text"), MAX_CONTEXT) or None,
+        reply_author_id=reply_author,
+        reply_author_name=_name(reply_from) or None,
+        reply_is_own=reply_is_own,
+        context=context,
     )
 
 
@@ -231,6 +248,35 @@ def _same_supplied_ids(update: Any, original: Any, fields: tuple[str, ...]) -> b
             if supplied is None or supplied != _id(original.get(field)):
                 return False
     return True
+
+
+def _apply_message_change(original: dict | None, event: dict) -> dict | None:
+    """Apply an edit/delete only to content; admission and thread identity stay fixed."""
+    if original is None:
+        return None
+    before, payload = original["payload"], event["payload"]
+    if (
+        ("type" in payload["chat"] and payload["chat"]["type"] != before["chat"].get("type"))
+        or (
+            "from" in payload
+            and not _same_supplied_ids(payload["from"], before.get("from"), ("userId",))
+        )
+        or (
+            "parent_topic" in payload
+            and not _same_supplied_ids(
+                payload["parent_topic"], before.get("parent_topic"), ("chatId", "messageId")
+            )
+        )
+    ):
+        return original
+    if event["type"] == "deletedMessage":
+        return None
+    updated = dict(before)
+    if "text" in payload:
+        updated["text"] = payload["text"]
+    # An edited snapshot without parts must not replay removed attachments.
+    updated["parts"] = payload.get("parts", [])
+    return {**original, "payload": updated}
 
 
 def coalesce_batch(events: list[dict]) -> list[dict]:
@@ -257,36 +303,7 @@ def coalesce_batch(events: list[dict]) -> list[dict]:
             pending[key] = len(result)
         elif kind in ("editedMessage", "deletedMessage") and key in pending:
             index = pending[key]
-            original = result[index]
-            if original is None:
-                continue
-            before = original["payload"]
-            if (
-                (
-                    "type" in payload["chat"]
-                    and payload["chat"]["type"] != before["chat"].get("type")
-                )
-                or (
-                    "from" in payload
-                    and not _same_supplied_ids(payload["from"], before.get("from"), ("userId",))
-                )
-                or (
-                    "parent_topic" in payload
-                    and not _same_supplied_ids(
-                        payload["parent_topic"], before.get("parent_topic"), ("chatId", "messageId")
-                    )
-                )
-            ):
-                continue
-            if kind == "deletedMessage":
-                result[index] = None
-            else:
-                updated = dict(before)
-                if "text" in payload:
-                    updated["text"] = payload["text"]
-                # An edited snapshot without parts must not replay removed attachments.
-                updated["parts"] = payload.get("parts", [])
-                result[index] = {**original, "payload": updated}
+            result[index] = _apply_message_change(result[index], event)
             continue
         result.append(event)
     return [event for event in result if event is not None]

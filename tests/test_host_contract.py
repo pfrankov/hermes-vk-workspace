@@ -175,12 +175,10 @@ def test_two_profile_installs_have_distinct_native_dependency_members(installed_
     documents = [tomllib.loads((member / "pyproject.toml").read_text()) for member in members]
     assert members[0] != members[1]
     assert documents[0]["project"]["name"] != documents[1]["project"]["name"]
+    declared = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]
     for document in documents:
-        assert document["project"]["dependencies"] == [
-            "aiohttp==3.14.3",
-            "Markdown==3.10.2",
-        ]
-        assert document["project"]["requires-python"] == ">=3.14,<3.15"
+        assert document["project"]["dependencies"] == declared["dependencies"]
+        assert document["project"]["requires-python"] == declared["requires-python"]
 
 
 def test_readme_yaml_uses_the_native_platform_config_loader(installed_plugin):

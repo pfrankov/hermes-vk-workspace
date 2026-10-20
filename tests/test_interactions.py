@@ -3,88 +3,37 @@
 import asyncio
 from contextvars import ContextVar
 from copy import deepcopy
-from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
-import hermes_vk_workspace as plugin
 import hermes_vk_workspace.interactions as interactions
 import pytest
-from gateway.config import Platform, PlatformConfig
-from gateway.platform_registry import PlatformEntry, platform_registry
-from gateway.platforms.base import BasePlatformAdapter, SendResult
 from gateway.platforms.event import MessageEvent
 from hermes_cli.model_switch_providers import list_picker_providers
-from hermes_constants import get_hermes_home, hermes_home_key
-from hermes_vk_workspace.api import ApiError, TeamsAPI
-from hermes_vk_workspace.interactions import MAX_MENUS, MENU_TTL, PickerManager
+from hermes_vk_workspace.api import ApiError
+from hermes_vk_workspace.interactions import MAX_MENUS, MENU_TTL
 
 CHAT = "engineering@chat.agent"
 USER = "alice@example.com"
 BOT = "hermes@example.com"
 
 
-class AdapterHarness(BasePlatformAdapter):
-    def __init__(self):
-        super().__init__(PlatformConfig(), Platform("vk-workspace"))
-        self.self_id = BOT
-        self.api = AsyncMock(spec=TeamsAPI)
-        self.api.send_text.side_effect = lambda *args, **kwargs: (
-            f"menu-{self.api.send_text.call_count}"
-        )
-        self.known = []
-        self.allowed = True
-        self.set_authorization_check(lambda *_args, **_kwargs: self.allowed)
-        self._current = ContextVar("picker_test_event", default=None)
-        self.event = MessageEvent(
-            text="/model",
-            source=self.build_source(chat_id=CHAT, chat_type="group", user_id=USER),
-            message_id="request-1",
-        )
-        self._current.set(self.event)
-        self.pickers = PickerManager(self)
-
-    def current_event(self):
-        return self._current.get()
-
-    def remember_message(self, chat_id, message_id):
-        self.known.append((chat_id, message_id))
-
-    def _ready(self, chat_id):
-        return None
-
-    def _failure(self, chat_id, exc):
-        return SendResult(False, error=str(exc), retryable=exc.retryable)
-
-    def _cancelled_delivery(self, chat_id):
-        pass
-
-    async def connect(self, *, is_reconnect=False):
-        return True
-
-    async def disconnect(self):
-        self.pickers.clear()
-
-    async def send(self, chat_id, content, reply_to=None, metadata=None):
-        return SendResult(success=True, message_id="ordinary-send")
-
-    async def get_chat_info(self, chat_id):
-        return {"name": "Engineering", "type": "group"}
-
-
 @pytest.fixture
-def adapter():
-    scope = hermes_home_key(get_hermes_home())
-    plugin.register(
-        SimpleNamespace(
-            register_platform=lambda **kwargs: platform_registry.register(
-                PlatformEntry(**kwargs), scope=scope
-            )
-        )
+async def adapter(adapter):
+    """Extend the shared real-adapter fixture with an active native-menu request."""
+    adapter.self_id = BOT
+    adapter.api.send_text.side_effect = lambda *_args, **_kwargs: (
+        f"menu-{adapter.api.send_text.call_count}"
     )
-    value = AdapterHarness()
-    yield value
-    value.pickers.clear()
-    platform_registry.unregister("vk-workspace", scope=scope)
+    adapter.allowed = True
+    adapter.set_authorization_check(lambda *_args, **_kwargs: adapter.allowed)
+    adapter.event = MessageEvent(
+        text="/model",
+        source=adapter.build_source(chat_id=CHAT, chat_type="group", user_id=USER),
+        message_id="request-1",
+    )
+    await adapter.on_processing_start(adapter.event)
+    yield adapter
+    adapter.pickers.clear()
 
 
 def callback_payload(token, message_id="menu-1", query_id="query-1"):
@@ -133,7 +82,6 @@ async def test_choice_invokes_public_callback_once_with_exact_value_and_retires_
     assert chosen.startswith("vkp:") and len(chosen) < 256
     assert all(value not in chosen for value in (USER, CHAT, "level-0", result.message_id))
     assert rows[0][0]["style"] == "primary"
-    assert adapter.known == [(CHAT, result.message_id)]
     assert adapter.api.send_text.call_args.kwargs["reply_to"] == "request-1"
     assert adapter.api.send_text.call_args.kwargs["parse_mode"] == "HTML"
     await adapter.pickers.handle(callback_payload(chosen))
@@ -271,11 +219,14 @@ async def test_callback_runs_in_captured_context_and_original_requester_is_bound
     _, _ = await choice(adapter, callback=selected)
     token = keyboard(adapter)[0][0]["callbackData"]
     marker.reset(binding)
-    poll_context = adapter._current.set(None)
-    try:
-        await adapter.pickers.handle(callback_payload(token))
-    finally:
-        adapter._current.reset(poll_context)
+    await adapter.on_processing_start(
+        MessageEvent(
+            text="a different request",
+            source=adapter.build_source(chat_id=CHAT, chat_type="group", user_id="bob@example.com"),
+            message_id="request-2",
+        )
+    )
+    await adapter.pickers.handle(callback_payload(token))
     assert seen == [("alice-profile", USER, CHAT, "level-0")]
 
 
@@ -460,6 +411,8 @@ async def test_send_and_edit_failures_do_not_retry_or_leave_actionable_menus(ada
     assert adapter.api.send_text.call_count == 1
     assert not adapter.pickers._menus
     callback.assert_not_awaited()
+    # An ambiguous send blocks this turn; a new user request gets a fresh scope.
+    await adapter.on_processing_start(adapter.event)
     adapter.api.send_text.side_effect = lambda *_args, **_kwargs: "menu-nav"
     _, callback = await choice(adapter, count=8)
     rows = keyboard(adapter)
@@ -532,11 +485,11 @@ async def test_long_labels_remain_complete_and_untrusted_markup_is_literal(adapt
         "oversized_catalog",
     ],
 )
-async def test_invalid_menu_requests_fail_before_network_io(adapter, case):
+async def test_invalid_menu_requests_fail_before_network_io(adapter, monkeypatch, case):
     chat_id, session_key, title = CHAT, adapter._event_session_key(adapter.event), "Choose"
     choices = [{"value": "one", "label": "One"}]
     if case == "missing_context":
-        adapter._current.set(None)
+        monkeypatch.setattr(adapter, "current_event", lambda: None)
     elif case == "wrong_chat":
         chat_id = "other@chat.agent"
     elif case == "wrong_session":

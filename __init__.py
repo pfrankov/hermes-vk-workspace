@@ -12,7 +12,11 @@ if TYPE_CHECKING:
 
 def check_requirements() -> bool:
     """Passive dependency probe used by Hermes' setup and status displays."""
-    return find_spec("aiohttp") is not None and find_spec("markdown") is not None
+    return (
+        find_spec("aiohttp") is not None
+        and find_spec("markdown") is not None
+        and find_spec("yarl") is not None
+    )
 
 
 def validate_config(config: PlatformConfig) -> bool:

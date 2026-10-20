@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import ipaddress
 import re
 import unicodedata
 from collections.abc import Mapping
@@ -61,6 +60,8 @@ def validate_target_ref(value: str) -> bool | str:
 
 
 def _split_url(value: object, key: str, allow_http: bool):
+    from yarl import URL
+
     if not isinstance(value, str) or not value or _has_unsafe_characters(value) or "\\" in value:
         raise ConfigError(f"{key} must be an absolute HTTPS URL without spaces")
     try:
@@ -82,12 +83,12 @@ def _split_url(value: object, key: str, allow_http: bool):
     if "%" in url.netloc or (port is not None and not 1 <= port <= 65535):
         raise ConfigError(f"{key} contains an invalid hostname or port")
     try:
+        # Match aiohttp's IDNA/IP normalization when establishing trusted origins.
+        host = URL(value).raw_host or ""
         if ":" in host:
-            host = f"[{ipaddress.IPv6Address(host).compressed}]"
-        else:
-            host = host.encode("idna").decode("ascii").lower()
-            if not re.fullmatch(r"[a-z0-9_.-]+", host):
-                raise ValueError
+            host = f"[{host}]"
+        elif not re.fullmatch(r"[a-z0-9_.-]+", host):
+            raise ValueError
     except UnicodeError, ValueError:
         raise ConfigError(f"{key} contains an invalid hostname") from None
     if port is not None and port != (443 if url.scheme == "https" else 80):
@@ -144,10 +145,6 @@ class Settings:
     allow_insecure_http: bool = False
     allowed_chats: tuple[str, ...] = ()
     require_mention: bool = True
-
-    @property
-    def base_origin(self) -> str:
-        return urlunsplit(urlsplit(self.base_url)._replace(path=""))
 
     @classmethod
     def from_platform(cls, config: PlatformConfig) -> Settings:

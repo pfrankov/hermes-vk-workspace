@@ -40,14 +40,42 @@ def test_formats_markdown_and_preserves_code_and_links():
 
 
 @pytest.mark.parametrize(
-    "source", ["&😀<" * 3000, "**bold " + "я😀" * 4000 + "**", "```\n" + "&x\n" * 3000 + "```"]
+    "source, displayed",
+    [
+        ("&😀<" * 3000, "&😀<" * 3000),
+        ("**bold " + "я😀" * 4000 + "**", "bold " + "я😀" * 4000),
+        ("```\n" + "&x\n" * 3000 + "```", "&x\n" * 3000),
+        ("A **bold *" + "я😀" * 100 + "* tail**", "A bold " + "я😀" * 100 + " tail"),
+    ],
 )
-def test_chunking_is_balanced_and_preserves_all_displayed_text(source):
-    whole = "".join(Parsed(c).text for c in render_chunks(source, limit=100_000))
+def test_chunking_is_balanced_and_preserves_all_displayed_text(source, displayed):
     chunks = render_chunks(source, limit=256)
     assert len(chunks) > 1
     assert all(utf16_length(c) <= 256 for c in chunks)
-    assert "".join(Parsed(c).text for c in chunks) == whole
+    assert "".join(Parsed(c).text for c in chunks) == displayed
+
+
+@pytest.mark.parametrize(
+    "source, displayed",
+    [
+        ("x" * 64, "x" * 64),
+        ("😀" * 32, "😀" * 32),
+        ("&" * 12 + "x" * 4, "&" * 12 + "x" * 4),
+        ("**" + "x" * 57 + "**", "x" * 57),
+    ],
+)
+def test_exact_wire_boundary_has_no_empty_continuation(source, displayed):
+    chunks = render_chunks(source, limit=64)
+    assert len(chunks) == 1 and utf16_length(chunks[0]) == 64
+    assert Parsed(chunks[0]).text == displayed
+
+
+def test_link_larger_than_chunk_budget_keeps_its_visible_label():
+    source = "[A readable label](https://example.org/" + "x" * 100 + ")"
+    chunks = render_chunks(source, limit=64)
+    assert len(chunks) == 1 and utf16_length(chunks[0]) <= 64
+    parsed = Parsed(chunks[0])
+    assert parsed.text == "A readable label" and not parsed.links
 
 
 def test_html_is_sanitized_and_unsafe_links_cannot_become_clickable():

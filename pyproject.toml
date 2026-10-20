@@ -1,12 +1,12 @@
 [project]
 name = "hermes-vk-workspace"
-version = "0.1.0"
+version = "0.1.1"
 description = "VK Workspace (VK Teams) messaging platform for Hermes Agent"
 readme = "README.md"
 requires-python = ">=3.14,<3.15"
 license = "Apache-2.0"
 authors = [{name = "Pavel Frankov"}]
-dependencies = ["aiohttp==3.14.3", "Markdown==3.10.2"]
+dependencies = ["aiohttp==3.14.3", "Markdown==3.10.2", "yarl==1.25.1"]
 
 [project.urls]
 Repository = "https://github.com/pfrankov/hermes-vk-workspace"
@@ -30,8 +30,11 @@ line-length = 100
 exclude = [".venv", ".hermes-test", ".ci", "build", "dist"]
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "ASYNC"]
+select = ["E", "F", "I", "UP", "B", "ASYNC", "C90"]
 ignore = ["E501"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*.py" = ["ASYNC240"]

@@ -7,10 +7,12 @@ import traceback
 import unittest
 import zlib
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, Mock, patch
 
+import pytest
 from aiohttp import web
-from hermes_vk_workspace.api import ApiError, TeamsAPI
+from hermes_vk_workspace.api import ApiError, TeamsAPI, _origin
+from hermes_vk_workspace.config import Settings
 
 
 class APITests(unittest.IsolatedAsyncioTestCase):
@@ -90,7 +92,12 @@ class APITests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(self.settings.token, str(caught.exception))
 
     async def test_send_and_edit_use_query_parameters(self):
-        keyboard = [[{"text": "Approve", "callbackData": "opaque-token", "style": "primary"}]]
+        keyboard = [
+            [
+                {"text": "Approve", "callbackData": "opaque-token", "style": "primary"},
+                {"text": "Docs", "url": "https://example.com/path#reference"},
+            ]
+        ]
         result = await self.api.send_text(
             "user@example",
             "<b>Привет & мир</b>",
@@ -464,13 +471,9 @@ class APITests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(caught.exception.code, "invalid_response")
         self.assertNotIn(self.settings.token, str(caught.exception))
 
-    async def test_invalid_keyboard_and_parse_mode_do_not_reach_transport(self):
+    async def test_invalid_parse_mode_does_not_reach_transport(self):
         with self.assertRaises(ApiError):
             await self.api.send_text("chat", "hello", parse_mode=[])
-        with self.assertRaises(ApiError):
-            await self.api.send_text(
-                "chat", "hello", keyboard=[[{"text": "Yes", "callbackData": "x", "style": []}]]
-            )
         self.assertEqual(self.seen, [])
 
     async def test_truncated_compressed_download_is_rejected(self):
@@ -483,3 +486,66 @@ class APITests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ApiError) as caught:
             await self.api.download(self.origin + "/truncated")
         self.assertEqual(caught.exception.code, "invalid_compressed_response")
+
+
+@pytest.mark.parametrize(
+    "keyboard",
+    [
+        pytest.param({}, id="not-a-keyboard"),
+        pytest.param([[]], id="empty-row"),
+        pytest.param([[{"text": "Yes", "callbackData": "x"}]] * 11, id="too-many-rows"),
+        pytest.param([[{"text": "Yes", "callbackData": "x"}] * 9], id="too-many-buttons"),
+        pytest.param([[None]], id="not-a-button"),
+        pytest.param([[{"text": "Yes", "callbackData": "x", "extra": True}]], id="unknown-field"),
+        pytest.param([[{"text": "", "callbackData": "x"}]], id="empty-label"),
+        pytest.param([[{"text": "x" * 129, "callbackData": "x"}]], id="long-label"),
+        pytest.param([[{"text": "Yes\n", "callbackData": "x"}]], id="control-in-label"),
+        pytest.param([[{"text": "Yes"}]], id="missing-action"),
+        pytest.param(
+            [[{"text": "Yes", "url": "https://example.com", "callbackData": "x"}]],
+            id="two-actions",
+        ),
+        pytest.param([[{"text": "Yes", "callbackData": "x", "style": []}]], id="invalid-style"),
+        pytest.param([[{"text": "Yes", "callbackData": []}]], id="invalid-callback-type"),
+        pytest.param([[{"text": "Yes", "callbackData": "x\x00"}]], id="control-in-callback"),
+        pytest.param([[{"text": "Yes", "callbackData": "😀" * 65}]], id="callback-byte-limit"),
+        pytest.param([[{"text": "Yes", "url": "file:///private"}]], id="unsafe-url-scheme"),
+        pytest.param(
+            [[{"text": "Yes", "url": "https://secret@example.com"}]], id="url-credentials"
+        ),
+        pytest.param([[{"text": "\ud800", "callbackData": "x"}]], id="invalid-unicode"),
+        pytest.param(
+            [[{"text": "Yes", "url": "https://example.com/" + "x" * (16 * 1024)}]],
+            id="keyboard-byte-limit",
+        ),
+    ],
+)
+async def test_invalid_keyboard_does_not_reach_transport(keyboard, monkeypatch):
+    api = TeamsAPI(SimpleNamespace())
+    request = AsyncMock(side_effect=AssertionError("Invalid keyboard reached the transport"))
+    monkeypatch.setattr(api, "_request", request)
+    with pytest.raises(ApiError):
+        await api.send_text("chat", "hello", keyboard=keyboard)
+    request.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("url", "origin"),
+    [
+        ("https://faß.example/file?signature=opaque", "https://xn--fa-hia.example"),
+        ("https://[0:0:0:0:0:0:0:1]:443/file", "https://[::1]"),
+    ],
+)
+def test_download_origin_preserves_idna_identity_and_ip_equivalence(url, origin):
+    assert _origin(url, False) == origin
+
+
+async def test_idna_alias_cannot_reach_a_host_outside_the_download_allowlist(monkeypatch):
+    api = TeamsAPI(Settings(base_url="https://fass.example/bot/v1", token="test-token"))
+    client = Mock()
+    client.get.side_effect = AssertionError("Untrusted hostname reached the HTTP client")
+    monkeypatch.setattr(api, "_client", lambda: client)
+    with pytest.raises(ApiError) as caught:
+        await api.download("https://faß.example/file")
+    assert caught.value.code == "untrusted_origin"
+    client.get.assert_not_called()

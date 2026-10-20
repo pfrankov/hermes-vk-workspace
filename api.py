@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import urljoin, urlsplit
 
 import aiohttp
+from yarl import URL
 
 from .media import (
     Media,
@@ -55,7 +56,6 @@ class ApiError(Exception):
     ):
         self.endpoint = endpoint if endpoint in _ENDPOINTS or endpoint == "download" else "request"
         self.code = code
-        self.kind = code
         self.status = status
         self.retryable = status == 429
         self.retry_after = retry_after
@@ -83,25 +83,18 @@ def _origin(value: str, allow_http: bool) -> str:
     ):
         raise ApiError("download", "untrusted_origin")
     try:
-        parsed = urlsplit(value)
+        parsed = URL(value)
         if parsed.scheme not in ({"http", "https"} if allow_http else {"https"}):
             raise ValueError
         if (
-            not parsed.hostname
-            or parsed.username is not None
+            not parsed.raw_host
+            or parsed.user is not None
             or parsed.password is not None
             or parsed.fragment
         ):
             raise ValueError
-        hostname = parsed.hostname.encode("idna").decode("ascii").lower()
-        hostname = f"[{hostname}]" if ":" in hostname else hostname
-        port = parsed.port
-        suffix = (
-            f":{port}"
-            if port is not None and port != (443 if parsed.scheme == "https" else 80)
-            else ""
-        )
-        return f"{parsed.scheme}://{hostname}{suffix}"
+        # Check the exact IDNA/IP normalization aiohttp uses for the request.
+        return str(parsed.origin())
     except ValueError, UnicodeError:
         raise ApiError("download", "untrusted_origin") from None
 
@@ -114,6 +107,36 @@ def _format_params(parse_mode: str | None) -> dict[str, str]:
     return {"parseMode": parse_mode}
 
 
+def _validate_button(button: object) -> None:
+    """Validate one button's label, action and style independently of keyboard layout."""
+    if not isinstance(button, dict) or set(button) - {"text", "url", "callbackData", "style"}:
+        raise ApiError("request", "invalid_keyboard")
+    text = button.get("text")
+    if (
+        not isinstance(text, str)
+        or not text.strip()
+        or len(text) > 128
+        or any(ord(c) < 32 for c in text)
+    ):
+        raise ApiError("request", "invalid_keyboard")
+    if ("url" in button) == ("callbackData" in button):
+        raise ApiError("request", "invalid_keyboard")
+    style = button.get("style", "base")
+    if not isinstance(style, str) or style not in {"base", "primary", "attention"}:
+        raise ApiError("request", "invalid_keyboard")
+    target = button.get("url", button.get("callbackData"))
+    if (
+        not isinstance(target, str)
+        or not target
+        or any(ord(c) < 32 or ord(c) == 127 for c in target)
+    ):
+        raise ApiError("request", "invalid_keyboard")
+    if "url" in button:
+        _origin(target.split("#", 1)[0], True)
+    elif len(target.encode("utf-8", errors="replace")) > 256:
+        raise ApiError("request", "invalid_keyboard")
+
+
 def _keyboard(value: list[list[dict[str, str]]] | None) -> dict[str, str]:
     if value is None:
         return {}
@@ -123,37 +146,7 @@ def _keyboard(value: list[list[dict[str, str]]] | None) -> dict[str, str]:
         if not isinstance(row, list) or not 1 <= len(row) <= 8:
             raise ApiError("request", "invalid_keyboard")
         for button in row:
-            if not isinstance(button, dict) or set(button) - {
-                "text",
-                "url",
-                "callbackData",
-                "style",
-            }:
-                raise ApiError("request", "invalid_keyboard")
-            text = button.get("text")
-            if (
-                not isinstance(text, str)
-                or not text.strip()
-                or len(text) > 128
-                or any(ord(c) < 32 for c in text)
-            ):
-                raise ApiError("request", "invalid_keyboard")
-            if ("url" in button) == ("callbackData" in button):
-                raise ApiError("request", "invalid_keyboard")
-            style = button.get("style", "base")
-            if not isinstance(style, str) or style not in {"base", "primary", "attention"}:
-                raise ApiError("request", "invalid_keyboard")
-            target = button.get("url", button.get("callbackData"))
-            if (
-                not isinstance(target, str)
-                or not target
-                or any(ord(c) < 32 or ord(c) == 127 for c in target)
-            ):
-                raise ApiError("request", "invalid_keyboard")
-            if "url" in button:
-                _origin(target.split("#", 1)[0], True)
-            elif len(target.encode("utf-8", errors="replace")) > 256:
-                raise ApiError("request", "invalid_keyboard")
+            _validate_button(button)
     try:
         encoded = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
         if len(encoded.encode("utf-8")) > 16 * 1024:

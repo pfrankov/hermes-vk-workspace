@@ -7,6 +7,7 @@ import mimetypes
 import os
 import re
 import stat
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -107,36 +108,55 @@ def native_voice_supported(media: Media) -> bool:
     return sniff_voice(media.data) in _NATIVE_VOICE
 
 
+def convert_voice(media: Media, limit: int) -> Media:
+    """Convert normalized voice bytes in a worker that owns its temporary files."""
+    from gateway.platforms.base import transcode_to_ogg_opus
+
+    # Work on the already authorized, bounded bytes. The worker owns its temporary
+    # files even if the caller is cancelled while ffmpeg is finishing.
+    with tempfile.TemporaryDirectory(prefix="hermes-vk-voice-") as directory:
+        source = Path(directory) / media.filename
+        source.write_bytes(media.data)
+        output = transcode_to_ogg_opus(
+            str(source), output_path=str(Path(directory) / "converted.ogg")
+        )
+        if output is None:
+            raise MediaError("voice_conversion_requires_ffmpeg")
+        with open(output, "rb") as stream:
+            data = stream.read(limit + 1)
+        if len(data) > limit:
+            raise MediaError("media_size_limit")
+        return normalize_voice(Media(data, "voice.ogg", "audio/ogg"))
+
+
 def _read_local(path: str | os.PathLike[str], max_bytes: int) -> Media:
-    descriptor = None
     try:
         # Hermes resolves and authorizes the path first. Reject a final-component
         # symlink substituted between that check and this open.
-        flags = (
-            os.O_RDONLY
-            | getattr(os, "O_NONBLOCK", 0)
+        extra_flags = (
+            getattr(os, "O_NONBLOCK", 0)
             | getattr(os, "O_CLOEXEC", 0)
             | getattr(os, "O_NOFOLLOW", 0)
         )
-        descriptor = os.open(path, flags)
-        info = os.fstat(descriptor)
-        if not stat.S_ISREG(info.st_mode):
-            raise MediaError("not_a_regular_file")
-        if info.st_size > max_bytes:
-            raise MediaError("size_limit")
-        with os.fdopen(descriptor, "rb") as handle:
-            descriptor = None
+        path = os.fspath(path)
+        with open(
+            path, "rb", opener=lambda path, flags: os.open(path, flags | extra_flags)
+        ) as handle:
+            info = os.fstat(handle.fileno())
+            if not stat.S_ISREG(info.st_mode):
+                raise MediaError("not_a_regular_file")
+            if info.st_size > max_bytes:
+                raise MediaError("size_limit")
             # The extra byte catches a file growing after fstat.
             data = handle.read(max_bytes + 1)
         if len(data) > max_bytes:
             raise MediaError("size_limit")
-        name = safe_filename(os.fspath(path))
+        name = safe_filename(path)
         return Media(data, name, sniff_image(data) or content_type(None, name))
+    except IsADirectoryError:
+        raise MediaError("not_a_regular_file") from None
     except OSError, TypeError, ValueError:
         raise MediaError("unreadable_file") from None
-    finally:
-        if descriptor is not None:
-            os.close(descriptor)
 
 
 async def local_file(path: str | os.PathLike[str], max_bytes: int) -> Media:

@@ -103,9 +103,13 @@ class MediaTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_missing_file_and_directory_fail_without_leaking_path(self):
         with tempfile.TemporaryDirectory() as directory:
-            for path in (Path(directory), Path(directory) / "private-secret.txt"):
+            for path, code in (
+                (Path(directory), "not_a_regular_file"),
+                (Path(directory) / "private-secret.txt", "unreadable_file"),
+            ):
                 with self.assertRaises(MediaError) as caught:
                     await local_file(path, 10)
+                self.assertEqual(caught.exception.code, code)
                 self.assertNotIn(str(path), str(caught.exception))
 
     @unittest.skipUnless(hasattr(os, "mkfifo"), "POSIX FIFO contract")

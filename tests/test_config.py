@@ -32,7 +32,6 @@ def platform(**extra):
 def test_defaults_are_https_profile_local_and_private_by_default():
     settings = Settings.from_platform(platform())
     assert settings.base_url == "https://teams.example.com/bot/v1"
-    assert settings.base_origin == "https://teams.example.com"
     assert settings.media_allowed_origins == ("https://teams.example.com",)
     assert settings.poll_time == 30
     assert settings.request_timeout == 30.0
@@ -111,6 +110,7 @@ def test_missing_or_malformed_tokens_fail_without_echoing_value(token):
         ("https://teams.example.com/prefix/bot/v1", "https://teams.example.com/prefix/bot/v1"),
         ("https://[::1]:8443/bot/v1", "https://[::1]:8443/bot/v1"),
         ("https://пример.рф", "https://xn--e1afmkfd.xn--p1ai/bot/v1"),
+        ("https://faß.example", "https://xn--fa-hia.example/bot/v1"),
     ],
 )
 def test_base_url_preserves_reverse_proxy_prefix_and_normalizes_origin(url, expected):

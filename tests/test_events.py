@@ -168,6 +168,7 @@ def test_all_attachment_kinds_and_duplicate_file_ids_are_bounded():
         part("sticker", fileId="sticker"),
         part("file", fileId="unknown", type=["untrusted"]),
         part("file", fileId="photo", type="image"),
+        part("voice", fileId="photo"),
     ]
     incoming = parse_message(message(text="", parts=files), BOT)
     assert incoming is not None and incoming.text == "[Attachment]"

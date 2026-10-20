@@ -7,7 +7,6 @@ import hashlib
 import json
 import logging
 import random
-import tempfile
 import time
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -19,7 +18,6 @@ from gateway.platforms.base import (
     SendResult,
     cache_image_from_url,
     cache_media_bytes_async,
-    transcode_to_ogg_opus,
 )
 from gateway.platforms.event import MessageEvent, MessageType
 from gateway.platforms.helpers import MessageDeduplicator, bounded_put, cancel_task
@@ -27,11 +25,12 @@ from hermes_constants import get_hermes_home
 
 from .api import ApiError, TeamsAPI
 from .config import PLATFORM, ConfigError, Settings, identifier
-from .events import coalesce_batch, event_id, parse_message
+from .events import Attachment, coalesce_batch, event_id, parse_message
 from .formatting import CAPTION_LIMIT, TEXT_LIMIT, render_chunks, utf16_length
 from .media import (
     Media,
     MediaError,
+    convert_voice,
     local_file,
     native_voice_supported,
     normalize_voice,
@@ -51,24 +50,6 @@ class DeliveryScope:
 
 
 _TURN: ContextVar[DeliveryScope | None] = ContextVar("vk_workspace_turn", default=None)
-
-
-def _convert_voice(media: Media, limit: int) -> Media:
-    # Work on the already authorized, bounded bytes. The worker owns its temporary
-    # files even if the caller is cancelled while ffmpeg is finishing.
-    with tempfile.TemporaryDirectory(prefix="hermes-vk-voice-") as directory:
-        source = Path(directory) / media.filename
-        source.write_bytes(media.data)
-        output = transcode_to_ogg_opus(
-            str(source), output_path=str(Path(directory) / "converted.ogg")
-        )
-        if output is None:
-            raise MediaError("voice_conversion_requires_ffmpeg")
-        with open(output, "rb") as stream:
-            data = stream.read(limit + 1)
-        if len(data) > limit:
-            raise MediaError("media_size_limit")
-        return normalize_voice(Media(data, "voice.ogg", "audio/ogg"))
 
 
 class VKWorkspaceAdapter(BasePlatformAdapter):
@@ -254,16 +235,7 @@ class VKWorkspaceAdapter(BasePlatformAdapter):
 
     async def _dispatch(self, raw: dict) -> None:
         if raw.get("type") == "callbackQuery":
-            if isinstance(raw.get("payload"), dict):
-                # Provider selection may perform host I/O. Keep it off the poll
-                # loop, with bounded concurrency and normal gateway teardown.
-                if len(self._callback_tasks) >= 32:
-                    await asyncio.wait(self._callback_tasks, return_when=asyncio.FIRST_COMPLETED)
-                task = asyncio.create_task(self._handle_callback(raw["payload"]))
-                self._callback_tasks.add(task)
-                self._background_tasks.add(task)
-                task.add_done_callback(self._callback_tasks.discard)
-                task.add_done_callback(self._background_tasks.discard)
+            await self._queue_callback(raw.get("payload"))
             return
         incoming = parse_message(raw, self.self_id)
         if incoming is None:
@@ -320,34 +292,52 @@ class VKWorkspaceAdapter(BasePlatformAdapter):
         )
         # Unapproved DMs still reach Hermes pairing, with no credentialed media fetch.
         if authorized:
-            for attachment in incoming.attachments:
-                try:
-                    info = await self.api.file_info(attachment.file_id)
-                    media = await self.api.download(info["url"], filename=info.get("filename"))
-                    if attachment.kind == "voice":
-                        media = normalize_voice(media)
-                    cached = await cache_media_bytes_async(
-                        media.data,
-                        filename=media.filename,
-                        mime_type=media.mime,
-                        default_kind={"voice": "audio", "sticker": "image"}.get(attachment.kind),
-                    )
-                    if cached is None:
-                        raise MediaError("invalid_image")
-                    event.media_urls.append(cached.path)
-                    event.media_types.append(cached.media_type)
-                    event.media_text_inlined.append(False)
-                    if len(incoming.attachments) == 1:
-                        event.message_type = {
-                            "voice": MessageType.VOICE,
-                            "image": MessageType.PHOTO,
-                            "audio": MessageType.AUDIO,
-                            "video": MessageType.VIDEO,
-                            "sticker": MessageType.STICKER,
-                        }.get(attachment.kind, MessageType.DOCUMENT)
-                except ApiError, MediaError, OSError, ValueError:
-                    event.text += "\n[An attachment could not be downloaded or validated.]"
+            await self._receive_attachments(event, incoming.attachments)
         await self.handle_message(event)
+
+    async def _receive_attachments(
+        self, event: MessageEvent, attachments: tuple[Attachment, ...]
+    ) -> None:
+        """Credentialed media I/O, called only after the sender and chat gates."""
+        for attachment in attachments:
+            try:
+                info = await self.api.file_info(attachment.file_id)
+                media = await self.api.download(info["url"], filename=info.get("filename"))
+                if attachment.kind == "voice":
+                    media = normalize_voice(media)
+                cached = await cache_media_bytes_async(
+                    media.data,
+                    filename=media.filename,
+                    mime_type=media.mime,
+                    default_kind={"voice": "audio", "sticker": "image"}.get(attachment.kind),
+                )
+                if cached is None:
+                    raise MediaError("invalid_image")
+                event.media_urls.append(cached.path)
+                event.media_types.append(cached.media_type)
+                event.media_text_inlined.append(False)
+                if len(attachments) == 1:
+                    event.message_type = {
+                        "voice": MessageType.VOICE,
+                        "image": MessageType.PHOTO,
+                        "audio": MessageType.AUDIO,
+                        "video": MessageType.VIDEO,
+                        "sticker": MessageType.STICKER,
+                    }.get(attachment.kind, MessageType.DOCUMENT)
+            except ApiError, MediaError, OSError, ValueError:
+                event.text += "\n[An attachment could not be downloaded or validated.]"
+
+    async def _queue_callback(self, payload) -> None:
+        """Keep slow host callbacks off polling, bounded and owned by gateway shutdown."""
+        if not isinstance(payload, dict):
+            return
+        if len(self._callback_tasks) >= 32:
+            await asyncio.wait(self._callback_tasks, return_when=asyncio.FIRST_COMPLETED)
+        task = asyncio.create_task(self._handle_callback(payload))
+        self._callback_tasks.add(task)
+        self._background_tasks.add(task)
+        task.add_done_callback(self._callback_tasks.discard)
+        task.add_done_callback(self._background_tasks.discard)
 
     async def _handle_callback(self, payload: dict) -> None:
         try:
@@ -527,7 +517,7 @@ class VKWorkspaceAdapter(BasePlatformAdapter):
         bounded_put(self._known_chats, chat_id, result, 1024)
         return dict(result)
 
-    async def _local_media(self, path, metadata=None) -> Media:
+    async def _local_media(self, path) -> Media:
         scope = self.current_event()
         session_key = self._event_session_key(scope) if scope is not None else ""
         safe_path = await asyncio.to_thread(self.validate_media_delivery_path, path, session_key)
@@ -602,7 +592,7 @@ class VKWorkspaceAdapter(BasePlatformAdapter):
         **kwargs,
     ) -> SendResult:
         try:
-            media = await self._local_media(file_path, metadata)
+            media = await self._local_media(file_path)
             if file_name:
                 media = Media(media.data, safe_filename(file_name), media.mime)
         except MediaError, OSError, ValueError:
@@ -615,7 +605,7 @@ class VKWorkspaceAdapter(BasePlatformAdapter):
         self, chat_id, image_path, caption=None, reply_to=None, metadata=None, **kwargs
     ) -> SendResult:
         try:
-            media = await self._local_media(image_path, metadata)
+            media = await self._local_media(image_path)
             mime = sniff_image(media.data)
             if mime is None:
                 raise MediaError("invalid_image")
@@ -650,13 +640,11 @@ class VKWorkspaceAdapter(BasePlatformAdapter):
         self, chat_id, audio_path, caption=None, reply_to=None, metadata=None, **kwargs
     ) -> SendResult:
         try:
-            media = normalize_voice(await self._local_media(audio_path, metadata))
+            media = normalize_voice(await self._local_media(audio_path))
             if not native_voice_supported(media):
                 # Hermes' TTS commonly produces MP3; VK native voice needs OGG/AAC/M4A.
                 # Unknown files are rejected before ffmpeg's auto-detection runs.
-                media = await asyncio.to_thread(
-                    _convert_voice, media, self.settings.media_max_bytes
-                )
+                media = await asyncio.to_thread(convert_voice, media, self.settings.media_max_bytes)
             return await self._upload(chat_id, media, caption, reply_to, metadata, voice=True)
         except MediaError as exc:
             if exc.code == "voice_conversion_requires_ffmpeg":

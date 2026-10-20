@@ -5,39 +5,14 @@ import os
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock
 
-import hermes_vk_workspace as plugin
 import pytest
-from gateway.config import PlatformConfig
 from gateway.platforms.event import MessageEvent, MessageType
 from gateway.stream_consumer import GatewayStreamConsumer, StreamConsumerConfig
-from hermes_cli.plugins import PluginContext, PluginManager
-from hermes_cli.plugins_manifest import parse_manifest_file
-from hermes_vk_workspace.adapter import VKWorkspaceAdapter, standalone_send
+from hermes_vk_workspace.adapter import standalone_send
 from hermes_vk_workspace.api import ApiError
 from hermes_vk_workspace.formatting import render_chunks, utf16_length
 from hermes_vk_workspace.media import Media, local_file
 from hermes_vk_workspace.state import StateError
-
-ROOT = Path(__file__).resolve().parents[1]
-
-
-@pytest.fixture
-def adapter():
-    manager = PluginManager()
-    plugin.register(
-        PluginContext(parse_manifest_file(ROOT / "plugin.yaml", ROOT, "user", ""), manager)
-    )
-    config = PlatformConfig(token="fake-bot-token", extra={"base_url": "https://vk.example"})
-    result = VKWorkspaceAdapter(config)
-    result._running = True
-    result.self_id = "bot@example"
-    result.api = AsyncMock()
-    result.api.send_text.side_effect = [str(n) for n in range(1, 1000)]
-    result.api.send_file.return_value = "file-1"
-    result.api.send_voice.return_value = "voice-1"
-    result.set_authorization_check(lambda *args, **kwargs: True)
-    yield result
-    manager.unload()
 
 
 def wire(
@@ -125,10 +100,16 @@ async def test_group_and_mention_gates_precede_media(
     adapter.settings = replace(adapter.settings, allowed_chats=("team@chat",) if allowed else ())
     adapter.set_authorization_check(lambda *args, **kwargs: authorized)
     adapter.handle_message = AsyncMock()
-    event = wire(chat="team@chat", kind="group", message="@[bot@example] hi" if mentioned else "hi")
+    adapter.api.file_info.side_effect = ApiError("files/getInfo", "api_rejected")
+    event = wire(
+        chat="team@chat",
+        kind="group",
+        message="@[bot@example] hi" if mentioned else "hi",
+        parts=[{"type": "file", "payload": {"fileId": "private-file"}}],
+    )
     await adapter._dispatch(event)
     assert adapter.handle_message.await_count == int(delivered)
-    adapter.api.file_info.assert_not_awaited()
+    assert adapter.api.file_info.await_count == int(delivered)
 
 
 async def test_native_thread_is_recipient_and_session_with_parent_gate(adapter):
@@ -373,9 +354,7 @@ async def test_separate_captions_follow_reply_mode(adapter, mode, voice):
 async def test_voice_conversion_failure_does_not_send_document(adapter, tmp_path, monkeypatch):
     path = tmp_path / "tts.mp3"
     path.write_bytes(b"ID3" + b"\0" * 40)
-    monkeypatch.setattr(
-        "hermes_vk_workspace.adapter.transcode_to_ogg_opus", Mock(return_value=None)
-    )
+    monkeypatch.setattr("gateway.platforms.base.transcode_to_ogg_opus", Mock(return_value=None))
     result = await adapter.send_voice("alice@example", str(path))
     assert not result.success and "ffmpeg" in result.error
     adapter.api.send_voice.assert_not_awaited()
@@ -646,7 +625,7 @@ async def test_flac_voice_uses_conversion_then_native_voice(adapter, tmp_path, m
         Path(output_path).write_bytes(b"OggS" + b"\0" * 64)
         return output_path
 
-    monkeypatch.setattr("hermes_vk_workspace.adapter.transcode_to_ogg_opus", transcode)
+    monkeypatch.setattr("gateway.platforms.base.transcode_to_ogg_opus", transcode)
     result = await adapter.send_voice("alice@example", str(path))
     assert result.success
     assert adapter.api.send_voice.call_args.args[1].startswith(b"OggS")

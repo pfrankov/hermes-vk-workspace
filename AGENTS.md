@@ -29,6 +29,24 @@ virtual environments or built distributions.
 
 ## Code Review Rules
 
+### Simplicity and responsibility
+
+Keep McCabe cyclomatic complexity at or below 10 per function; Ruff C901 enforces
+the limit in production code and tests. Do not hide branches in arbitrary lookup
+tables or suppress the rule to make the metric pass.
+
+Extract helpers for code reused by at least two production callers, or for a clear
+responsibility that needs its own boundary: a host hook, callback, parser, validation
+policy, worker or resource lifetime. A single call is valid for those boundaries;
+one-use glue should stay at its call site. Test calls do not establish production
+reuse. Remove dead parameters and duplicate state before adding abstractions.
+
+Use shared fixtures for repeated setup and spec-constrained mocks at external
+boundaries. Test observable behavior and failure boundaries, not every private
+helper separately. Do not derive expected results by calling the implementation
+being tested. Keep distinct regression cases, but combine equivalent cases with
+parametrization when their setup and assertion are the same.
+
 ### Authorization and source isolation
 
 Authorize the native sender and chat before downloading attachments or starting
@@ -43,7 +61,8 @@ The Bot API authenticates through a `token` query parameter. Never expose tokens
 signed URLs, raw provider responses or secret-bearing exception causes in logs,
 model context or persisted errors. Check logical errors even on HTTP 200. Bound
 response sizes, downloads, redirects and timeouts; validate every media redirect
-against configured trust. Preserve local-file checks against traversal, symlink
+against configured trust using the same URL parser as the HTTP client, including
+IDNA and IPv6 normalization. Preserve local-file checks against traversal, symlink
 escapes and blocking special files. Do not infer retry safety from HTTP GET:
 VK message sends also use GET. Never automatically retry an ambiguous send.
 
