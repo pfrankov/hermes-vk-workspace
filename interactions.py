@@ -117,7 +117,8 @@ class PickerManager:
     def _authorized(self, menu: _Menu) -> bool:
         source = menu.source
         return (
-            menu.expires_at > monotonic()
+            self.adapter._running
+            and menu.expires_at > monotonic()
             and menu.generation == self._generation
             and self.adapter.self_id == menu.bot_id
             and self.adapter._source_session_key(source) == menu.session_key
@@ -272,6 +273,7 @@ class PickerManager:
                     )
                 )
             menu = self._make(chat_id, title, tuple(items), session_key, on_choice_selected)
+            menu.page = next((i // PAGE_SIZE for i, item in enumerate(items) if item.current), 0)
             return await self._send(menu)
         except ConfigError, ValueError, UnicodeError:
             return SendResult(
@@ -314,6 +316,16 @@ class PickerManager:
             provider_label = _literal(current_provider or "unknown")
             title = f"Choose a model\n\nCurrent: {current}\nProvider: {provider_label}"
             menu = self._make(chat_id, title, tuple(items), session_key, on_model_selected)
+            for index, item in enumerate(items):
+                if item.current:
+                    menu.provider_page = index // PAGE_SIZE
+                    menu.page = menu.provider_page
+                    selected = next(
+                        (i for i, child in enumerate(item.children or ()) if child.current), None
+                    )
+                    if selected is not None:
+                        menu.provider, menu.page = index, selected // PAGE_SIZE
+                    break
             return await self._send(menu)
         except ConfigError, ValueError, UnicodeError:
             return SendResult(success=False, error="Invalid or oversized model picker; use /model")
@@ -430,7 +442,15 @@ class PickerManager:
             await task
             return
         if action == "open":
-            menu.provider_page, menu.provider, menu.page = menu.page, index, 0
+            menu.provider_page, menu.provider = menu.page, index
+            menu.page = next(
+                (
+                    i // PAGE_SIZE
+                    for i, item in enumerate(menu.items[index].children or ())
+                    if item.current
+                ),
+                0,
+            )
         elif action == "back":
             menu.provider, menu.page = None, menu.provider_page
         else:

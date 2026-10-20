@@ -47,6 +47,48 @@ def inbound(adapter, *, chat="alice@example", user="alice@example", msg_id="1"):
     )
 
 
+@pytest.mark.parametrize("method", ["send_document", "send_image_file", "send_image", "send_voice"])
+async def test_blocked_media_never_reads_downloads_or_converts(adapter, monkeypatch, method):
+    event = inbound(adapter)
+    await adapter.on_processing_start(event)
+    adapter._scope("alice@example").blocked = True
+    read = AsyncMock(side_effect=AssertionError("Media read must not run"))
+    fetch = AsyncMock(side_effect=AssertionError("Media download must not run"))
+    monkeypatch.setattr(adapter, "_local_media", read)
+    monkeypatch.setattr("hermes_vk_workspace.adapter.cache_image_from_url", fetch)
+    result = await getattr(adapter, method)("alice@example", "untrusted-path-or-url")
+    assert result.success is False
+    assert "uncertain" in result.error
+    read.assert_not_awaited()
+    fetch.assert_not_awaited()
+    adapter.api.send_file.assert_not_awaited()
+    adapter.api.send_voice.assert_not_awaited()
+
+
+async def test_invalid_media_target_fails_before_read_or_fetch(adapter, monkeypatch):
+    read = AsyncMock(side_effect=AssertionError("Invalid target must not read"))
+    monkeypatch.setattr(adapter, "_local_media", read)
+    result = await adapter.send_document("invalid id with spaces", "/tmp/anything")
+    assert not result.success
+    read.assert_not_awaited()
+
+
+async def test_stale_nonempty_event_batch_is_rate_limited(adapter, monkeypatch):
+    adapter._cursor = 6
+    adapter.api.events.return_value = [wire(update=6)]
+    observed = []
+
+    async def sleep(delay):
+        observed.append(delay)
+        adapter._running = False
+
+    monkeypatch.setattr(asyncio, "sleep", sleep)
+    await adapter._poll()
+    assert len(observed) == 1 and observed[0] > 0
+    adapter.api.events.assert_awaited_once()
+    adapter.api.file_info.assert_not_awaited()
+
+
 async def test_gateway_admission_processes_new_message_without_reimplementing_sessions(adapter):
     handled = asyncio.Event()
     seen = []

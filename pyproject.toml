@@ -1,6 +1,6 @@
 [project]
 name = "hermes-vk-workspace"
-version = "0.1.1"
+version = "0.2.0"
 description = "VK Workspace (VK Teams) messaging platform for Hermes Agent"
 readme = "README.md"
 requires-python = ">=3.14,<3.15"

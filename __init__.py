@@ -51,6 +51,7 @@ def _home_channel_seed() -> dict:
 
 def register(ctx: PluginContext) -> None:
     from .config import HOME_ENV, PLATFORM, TOKEN_ENV, parse_target_ref, validate_target_ref
+    from .setup import setup_platform
 
     ctx.register_platform(
         name=PLATFORM,
@@ -61,6 +62,7 @@ def register(ctx: PluginContext) -> None:
         is_connected=validate_config,
         required_env=[TOKEN_ENV],
         install_hint="Run `hermes plugins install pfrankov/hermes-vk-workspace --yes-deps --enable`",
+        setup_fn=setup_platform,
         allowed_users_env="VK_WORKSPACE_ALLOWED_USERS",
         allow_all_env="VK_WORKSPACE_ALLOW_ALL_USERS",
         env_enablement_fn=_home_channel_seed,

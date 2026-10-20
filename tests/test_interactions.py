@@ -230,6 +230,43 @@ async def test_callback_runs_in_captured_context_and_original_requester_is_bound
     assert seen == [("alice-profile", USER, CHAT, "level-0")]
 
 
+async def test_choice_starts_on_page_with_current_value(adapter):
+    callback = AsyncMock(return_value="Changed")
+    result = await adapter.pickers.choice(
+        CHAT,
+        "Choose reasoning",
+        [{"value": f"r-{i}", "label": f"Level {i}", "is_current": i == 13} for i in range(14)],
+        adapter._event_session_key(adapter.event),
+        callback,
+    )
+    assert result.success
+    rows = keyboard(adapter)
+    assert len(rows[:-1]) == 2
+    assert rows[1][0]["text"].startswith("14.")
+    assert rows[1][0]["style"] == "primary"
+    await adapter.pickers.handle(callback_payload(rows[1][0]["callbackData"]))
+    callback.assert_awaited_once_with(CHAT, "r-13")
+
+
+async def test_gateway_stopping_during_ack_rejects_old_picker_action(adapter):
+    _, callback = await choice(adapter)
+    token = keyboard(adapter)[0][0]["callbackData"]
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def delayed_ack(*_args, **_kwargs):
+        entered.set()
+        await release.wait()
+
+    adapter.api.answer_callback.side_effect = delayed_ack
+    task = asyncio.create_task(adapter.pickers.handle(callback_payload(token)))
+    await entered.wait()
+    # disconnect marks the platform stopped before callbacks and socket teardown complete.
+    adapter._running = False
+    release.set()
+    await task
+    callback.assert_not_awaited()
+
+
 async def test_choices_paginate_six_rows_and_retire_old_page_tokens(adapter):
     _, callback = await choice(adapter, count=14)
     first_rows = keyboard(adapter)
@@ -293,31 +330,29 @@ async def test_provider_model_drilldown_uses_latest_hermes_provider_shape(adapte
         callback,
     )
     assert result.success
-    await adapter.pickers.handle(callback_payload(token_named(keyboard(adapter), "Next")))
-    second_provider_page = keyboard(adapter, edited=True)
-    assert second_provider_page[0][0]["style"] == "primary"
+    # The active provider/model is immediately visible on its own page.
+    initial_models = keyboard(adapter)
+    assert len(initial_models[:-1]) == 2
+    assert initial_models[1][0]["style"] == "primary"
     await adapter.pickers.handle(
-        callback_payload(second_provider_page[0][0]["callbackData"], query_id="open-provider")
+        callback_payload(token_named(initial_models, "Providers"), query_id="back-providers")
     )
-    models = keyboard(adapter, edited=True)
-    assert len(models[:-1]) == 6
-    assert token_named(models, "Providers")
+    provider_page = keyboard(adapter, edited=True)
+    assert provider_page[0][0]["text"].startswith("7.")
+    assert provider_page[0][0]["style"] == "primary"
     await adapter.pickers.handle(
-        callback_payload(token_named(models, "Next"), query_id="models-next")
+        callback_payload(provider_page[0][0]["callbackData"], query_id="reopen-provider")
     )
-    last_models = keyboard(adapter, edited=True)
-    assert last_models[1][0]["style"] == "primary"
+    reopened_models = keyboard(adapter, edited=True)
+    assert len(reopened_models[:-1]) == 2
+    assert reopened_models[1][0]["style"] == "primary"
     await adapter.pickers.handle(
-        callback_payload(token_named(last_models, "Providers"), query_id="back")
+        callback_payload(token_named(reopened_models, "Previous"), query_id="model-prev")
     )
-    assert keyboard(adapter, edited=True)[0][0]["text"].startswith("7.")
+    first_models = keyboard(adapter, edited=True)
+    assert len(first_models[:-1]) == 6
     await adapter.pickers.handle(
-        callback_payload(keyboard(adapter, edited=True)[0][0]["callbackData"], query_id="reopen")
-    )
-    await adapter.pickers.handle(
-        callback_payload(
-            token_named(keyboard(adapter, edited=True), "Next"), query_id="models-next-again"
-        )
+        callback_payload(token_named(first_models, "Next"), query_id="model-next")
     )
     await adapter.pickers.handle(
         callback_payload(

@@ -165,12 +165,13 @@ class VKWorkspaceAdapter(BasePlatformAdapter):
             started = time.monotonic()
             try:
                 events = await self.api.events(self._cursor, self.settings.poll_time)
+                cursor_before = self._cursor
                 await self._process_batch(events)
                 if failures:
                     self._mark_connected()
                 failures = 0
-                # A proxy returning empty batches instantly must not cause a busy loop.
-                if not events:
+                # A proxy returning empty or already-acknowledged batches must not spin.
+                if self._cursor == cursor_before:
                     await asyncio.sleep(max(0, 0.25 - (time.monotonic() - started)))
             except asyncio.CancelledError:
                 raise
@@ -517,6 +518,14 @@ class VKWorkspaceAdapter(BasePlatformAdapter):
         bounded_put(self._known_chats, chat_id, result, 1024)
         return dict(result)
 
+    def _media_ready(self, chat_id, metadata=None) -> SendResult | None:
+        """Reject invalid/blocked destinations before reading, fetching or transcoding media."""
+        try:
+            chat_id = self._target(chat_id, metadata)
+        except ConfigError as exc:
+            return SendResult(False, error=str(exc))
+        return self._ready(chat_id)
+
     async def _local_media(self, path) -> Media:
         scope = self.current_event()
         session_key = self._event_session_key(scope) if scope is not None else ""
@@ -591,6 +600,8 @@ class VKWorkspaceAdapter(BasePlatformAdapter):
         metadata=None,
         **kwargs,
     ) -> SendResult:
+        if failure := self._media_ready(chat_id, metadata):
+            return failure
         try:
             media = await self._local_media(file_path)
             if file_name:
@@ -604,6 +615,8 @@ class VKWorkspaceAdapter(BasePlatformAdapter):
     async def send_image_file(
         self, chat_id, image_path, caption=None, reply_to=None, metadata=None, **kwargs
     ) -> SendResult:
+        if failure := self._media_ready(chat_id, metadata):
+            return failure
         try:
             media = await self._local_media(image_path)
             mime = sniff_image(media.data)
@@ -619,6 +632,8 @@ class VKWorkspaceAdapter(BasePlatformAdapter):
     async def send_image(
         self, chat_id, image_url, caption=None, reply_to=None, metadata=None
     ) -> SendResult:
+        if failure := self._media_ready(chat_id, metadata):
+            return failure
         # Public model-generated images use Hermes' maintained DNS/redirect SSRF guard
         # and image validation. VK incoming downloads use the explicit origin policy.
         try:
@@ -639,6 +654,8 @@ class VKWorkspaceAdapter(BasePlatformAdapter):
     async def send_voice(
         self, chat_id, audio_path, caption=None, reply_to=None, metadata=None, **kwargs
     ) -> SendResult:
+        if failure := self._media_ready(chat_id, metadata):
+            return failure
         try:
             media = normalize_voice(await self._local_media(audio_path))
             if not native_voice_supported(media):
