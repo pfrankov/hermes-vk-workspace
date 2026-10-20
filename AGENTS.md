@@ -29,6 +29,11 @@ virtual environments or built distributions.
 
 ## Code Review Rules
 
+### Setup and asynchronous lifecycle
+
+Use the native Hermes platform `setup_fn` hook for configuration. Never write a token until the real gateway loader confirms the effective server URL and enabled state; managed overlays can override a successful local YAML write. Keep other configuration keys unchanged. In shutdown and callback code, verify connected state after each awaited external acknowledgement. Reject blocked outgoing media before file I/O, URL download or transcoding; continue checking again before transport delivery.
+
+
 ### Simplicity and responsibility
 
 Keep McCabe cyclomatic complexity at or below 10 per function; Ruff C901 enforces
