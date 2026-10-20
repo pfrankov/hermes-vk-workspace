@@ -1,0 +1,35 @@
+manifest_version: 2
+name: vk-workspace-platform
+label: VK Workspace
+kind: platform
+version: 0.1.0
+requires_hermes: ">=0.22.2"
+description: >
+  VK Workspace (VK Teams) Bot API platform for Hermes Agent.
+  Configure the server base_url and behavior in platforms.vk-workspace in config.yaml.
+author: Pavel Frankov
+license: Apache-2.0
+homepage: https://github.com/pfrankov/hermes-vk-workspace
+tags: [platform, messaging, vk-workspace, vk-teams]
+requires_env:
+  - name: VK_WORKSPACE_BOT_TOKEN
+    description: Bot API token for the active Hermes profile
+    prompt: VK Workspace Bot API token
+    password: true
+optional_env:
+  - name: VK_WORKSPACE_ALLOWED_USERS
+    description: Comma-separated native user IDs allowed by Hermes; YAML allowed_users is also supported
+    prompt: Allowed VK Workspace users
+    password: false
+  - name: VK_WORKSPACE_ALLOW_ALL_USERS
+    description: Explicitly allow every user through Hermes authorization (true/false)
+    prompt: Allow all VK Workspace users?
+    password: false
+  - name: VK_WORKSPACE_HOME_CHANNEL
+    description: Native chat ID for scheduled notifications and cron delivery
+    prompt: VK Workspace home chat ID
+    password: false
+  - name: VK_WORKSPACE_HOME_CHANNEL_NAME
+    description: Display name of the home chat
+    prompt: VK Workspace home chat name
+    password: false

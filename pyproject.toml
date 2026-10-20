@@ -1,0 +1,37 @@
+[project]
+name = "hermes-vk-workspace"
+version = "0.1.0"
+description = "VK Workspace (VK Teams) messaging platform for Hermes Agent"
+readme = "README.md"
+requires-python = ">=3.14,<3.15"
+license = "Apache-2.0"
+authors = [{name = "Pavel Frankov"}]
+dependencies = ["aiohttp==3.14.3", "Markdown==3.10.2"]
+
+[project.urls]
+Repository = "https://github.com/pfrankov/hermes-vk-workspace"
+Issues = "https://github.com/pfrankov/hermes-vk-workspace/issues"
+
+[tool.uv]
+package = false
+
+[dependency-groups]
+dev = ["pytest==9.1.1", "pytest-asyncio==1.3.0", "ruff==0.15.10"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+filterwarnings = ["error::ResourceWarning"]
+
+[tool.ruff]
+target-version = "py314"
+line-length = 100
+exclude = [".venv", ".hermes-test", ".ci", "build", "dist"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC"]
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*.py" = ["ASYNC240"]
