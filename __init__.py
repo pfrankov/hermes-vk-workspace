@@ -29,6 +29,27 @@ def validate_config(config: PlatformConfig) -> bool:
     return True
 
 
+def is_configured(config: PlatformConfig) -> bool:
+    """Validate native configs and the setup wizard's empty active-profile probe."""
+    if config.extra:
+        return validate_config(config)
+    from gateway.config import PlatformConfig
+    from hermes_cli.config import load_config_readonly
+
+    from .config import PLATFORM
+
+    # The gateway loader calls this hook during env enablement: loading it here
+    # would recurse. The CLI reader merges profile YAML and managed overlays.
+    platforms = load_config_readonly().get("platforms")
+    if not isinstance(platforms, dict):
+        return False
+    values = platforms.get(PLATFORM)
+    if not isinstance(values, dict):
+        return False
+    saved = PlatformConfig.from_dict(values)
+    return bool(saved.enabled and validate_config(saved))
+
+
 def create_adapter(config: PlatformConfig):
     from .adapter import VKWorkspaceAdapter
 
@@ -59,7 +80,7 @@ def register(ctx: PluginContext) -> None:
         adapter_factory=create_adapter,
         check_fn=check_requirements,
         validate_config=validate_config,
-        is_connected=validate_config,
+        is_connected=is_configured,
         required_env=[TOKEN_ENV],
         install_hint="Run `hermes plugins install pfrankov/hermes-vk-workspace --yes-deps --enable`",
         setup_fn=setup_platform,
