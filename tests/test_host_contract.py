@@ -292,6 +292,23 @@ def test_native_setup_status_reads_the_active_profile(installed_plugin, fields, 
     assert installed_plugin.entry.is_connected(invalid) is False
 
 
+@pytest.mark.parametrize(
+    "home_channel",
+    [{"chat_id": "team@chat.agent"}, {"platform": "unknown", "chat_id": "team@chat.agent"}],
+    ids=["without-platform", "unknown-platform"],
+)
+def test_native_setup_status_treats_a_malformed_saved_block_as_not_configured(
+    installed_plugin, home_channel
+):
+    fields = {"enabled": True, "base_url": "https://teams.example", "home_channel": home_channel}
+    (installed_plugin.home / "config.yaml").write_text(
+        yaml.safe_dump({"platforms": {PLATFORM: fields}})
+    )
+    # Call the hook directly: the host's status menu would also mask an exception.
+    assert installed_plugin.entry.is_connected(PlatformConfig(enabled=True)) is False
+    assert _platform_status({"_registry_entry": installed_plugin.entry}) == "not configured"
+
+
 def test_native_setup_status_does_not_borrow_another_profiles_token(
     installed_plugin, monkeypatch, tmp_path
 ):

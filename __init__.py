@@ -40,13 +40,16 @@ def is_configured(config: PlatformConfig) -> bool:
 
     # The gateway loader calls this hook during env enablement: loading it here
     # would recurse. The CLI reader merges profile YAML and managed overlays.
-    platforms = load_config_readonly().get("platforms")
-    if not isinstance(platforms, dict):
+    # Unparseable YAML already falls back to the host's last-known-good settings; a malformed
+    # saved block (e.g. home_channel without a valid platform) makes the host parser raise.
+    try:
+        platforms = load_config_readonly().get("platforms")
+        values = platforms.get(PLATFORM) if isinstance(platforms, dict) else None
+        if not isinstance(values, dict):
+            return False
+        saved = PlatformConfig.from_dict(values)
+    except OSError, KeyError, TypeError, ValueError:
         return False
-    values = platforms.get(PLATFORM)
-    if not isinstance(values, dict):
-        return False
-    saved = PlatformConfig.from_dict(values)
     return bool(saved.enabled and validate_config(saved))
 
 
