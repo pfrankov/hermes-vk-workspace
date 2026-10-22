@@ -22,11 +22,18 @@ import gateway.config
 import hermes_cli.plugins
 import hermes_yaml as yaml
 import pytest
+from agent.secret_scope import (
+    reset_multiplex_context,
+    reset_secret_scope,
+    set_multiplex_context,
+    set_secret_scope,
+)
 from gateway.authz_mixin import GatewayAuthorizationMixin
 from gateway.config import Platform, PlatformConfig, load_gateway_config
 from gateway.platform_registry import platform_registry
 from gateway.platforms.base import BasePlatformAdapter
 from gateway.session import build_session_key
+from hermes_cli.gateway_setup_wizard import _platform_status
 from hermes_cli.plugin_validate import validate_plugin_dir
 from hermes_cli.plugin_validate_private_imports import private_import_findings
 from hermes_cli.plugins import PluginManager, get_plugin_manager
@@ -246,6 +253,80 @@ def test_registered_auth_environment_overrides_yaml(installed_plugin, monkeypatc
     assert host._is_user_authorized(alice) is False
     monkeypatch.setenv("VK_WORKSPACE_ALLOW_ALL_USERS", "true")
     assert host._is_user_authorized(alice) is True
+
+
+def test_setup_explicit_users_close_existing_allow_all_in_real_host(installed_plugin, monkeypatch):
+    adapter = installed_plugin.adapter
+    host = authorization_host(installed_plugin)
+    alice = adapter.build_source(chat_id="alice@example.com", user_id="alice@example.com")
+    outsider = adapter.build_source(chat_id="outsider@example.com", user_id="outsider@example.com")
+    monkeypatch.setenv("VK_WORKSPACE_ALLOW_ALL_USERS", "true")
+    assert host._is_user_authorized(outsider) is True
+    setup = inspect.getmodule(installed_plugin.entry.setup_fn)
+    answers = iter(["https://new.example", "new-test-token", "alice@example.com"])
+    monkeypatch.setattr(setup, "_ask", lambda *_args, **_kwargs: next(answers))
+
+    installed_plugin.entry.setup_fn()
+
+    assert host._is_user_authorized(alice) is True
+    assert host._is_user_authorized(outsider) is False
+    assert _platform_status({"_registry_entry": installed_plugin.entry}) == "configured"
+
+
+@pytest.mark.parametrize(
+    ("fields", "expected"),
+    [
+        ({"enabled": True, "base_url": "https://teams.example"}, "configured"),
+        ({"enabled": False, "base_url": "https://teams.example"}, "not configured"),
+        ({"enabled": True}, "not configured"),
+        ({"enabled": True, "base_url": "http://teams.example"}, "not configured"),
+    ],
+)
+def test_native_setup_status_reads_the_active_profile(installed_plugin, fields, expected):
+    (installed_plugin.home / "config.yaml").write_text(
+        yaml.safe_dump({"platforms": {PLATFORM: fields}})
+    )
+    assert _platform_status({"_registry_entry": installed_plugin.entry}) == expected
+    # A substantive supplied config remains authoritative, even when the saved profile is valid.
+    invalid = PlatformConfig(enabled=True, extra={"base_url": "http://invalid.example"})
+    assert installed_plugin.entry.is_connected(invalid) is False
+
+
+@pytest.mark.parametrize(
+    "home_channel",
+    [{"chat_id": "team@chat.agent"}, {"platform": "unknown", "chat_id": "team@chat.agent"}],
+    ids=["without-platform", "unknown-platform"],
+)
+def test_native_setup_status_treats_a_malformed_saved_block_as_not_configured(
+    installed_plugin, home_channel
+):
+    fields = {"enabled": True, "base_url": "https://teams.example", "home_channel": home_channel}
+    (installed_plugin.home / "config.yaml").write_text(
+        yaml.safe_dump({"platforms": {PLATFORM: fields}})
+    )
+    # Call the hook directly: the host's status menu would also mask an exception.
+    assert installed_plugin.entry.is_connected(PlatformConfig(enabled=True)) is False
+    assert _platform_status({"_registry_entry": installed_plugin.entry}) == "not configured"
+
+
+def test_native_setup_status_does_not_borrow_another_profiles_token(
+    installed_plugin, monkeypatch, tmp_path
+):
+    secondary = tmp_path / "secondary-profile"
+    secondary.mkdir()
+    (secondary / "config.yaml").write_text(
+        yaml.safe_dump(
+            {"platforms": {PLATFORM: {"enabled": True, "base_url": "https://teams.example"}}}
+        )
+    )
+    monkeypatch.setenv("HERMES_HOME", str(secondary))
+    multiplex = set_multiplex_context(True)
+    scope = set_secret_scope({})
+    try:
+        assert _platform_status({"_registry_entry": installed_plugin.entry}) == "not configured"
+    finally:
+        reset_secret_scope(scope)
+        reset_multiplex_context(multiplex)
 
 
 def test_real_source_profile_ownership_and_session_isolation(installed_plugin):
