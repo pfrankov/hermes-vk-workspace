@@ -2,8 +2,8 @@ manifest_version: 2
 name: vk-workspace-platform
 label: VK Workspace
 kind: platform
-version: 0.2.0
-requires_hermes: ">=0.22.2"
+version: 0.2.1
+requires_hermes: ">=0.22.5"
 description: >
   VK Workspace (VK Teams) Bot API platform for Hermes Agent.
   Configure with hermes gateway setup or platforms.vk-workspace in config.yaml.

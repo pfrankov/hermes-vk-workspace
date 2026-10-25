@@ -318,6 +318,6 @@ def test_manifest_is_valid_for_current_hermes_and_registers_no_model_tools():
     assert manifest is not None
     assert manifest.name == "vk-workspace-platform"
     assert manifest.kind == "platform"
-    assert manifest.requires_hermes == ">=0.22.2"
+    assert manifest.requires_hermes == ">=0.22.5"
     assert requires_hermes_error(manifest) is None
     assert manifest.provides_tools == []
