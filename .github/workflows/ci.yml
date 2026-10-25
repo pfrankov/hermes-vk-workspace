@@ -18,7 +18,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
-      HERMES_REVISION: d923a5eb487a17c0a68801bba9ef0f56c81040a8
+      HERMES_REVISION: bf0203a794a07aac3ff764972ab9087baa4e4f4e
       HERMES_SOURCE_PATH: ${{ github.workspace }}/.ci/hermes-agent
       HERMES_HOME: ${{ github.workspace }}/.hermes-test
       HERMES_SKIP_DOTENV: "1"
@@ -39,23 +39,19 @@ jobs:
       - name: Set up uv and Python
         uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
-          version: "0.13.2"
+          version: "0.13.4"
           python-version: "3.14.8"
           enable-cache: true
           cache-dependency-glob: |
             uv.lock
-            .ci/hermes-agent/pyproject.toml
+            .ci/hermes-agent/uv.lock
 
-      - name: Install locked plugin dependencies
-        run: uv sync --locked --group dev
-
-      - name: Install the real Hermes host
+      - name: Build the locked test environment with Hermes PM
         run: |
           test "$(git -C "$HERMES_SOURCE_PATH" rev-parse HEAD)" = "$HERMES_REVISION"
-          uv pip install --python .venv/bin/python --editable "$HERMES_SOURCE_PATH"
-          uv pip check --python .venv/bin/python
+          bash scripts/build-test-env.sh
 
-      # Do not sync again: an exact sync would remove the separately installed host.
+      # Preserve the PM-built host environment; do not sync the standalone plugin graph.
       - name: Check Python code
         run: |
           uv run --no-sync ruff check .
@@ -66,6 +62,11 @@ jobs:
 
       - name: Validate native plugin against stable Hermes
         run: uv run --no-sync pytest tests/test_host_contract.py
+
+      - name: Exercise the native foreground gateway lifecycle
+        env:
+          HERMES_GATEWAY_SMOKE: "1"
+        run: uv run --no-sync pytest tests/test_gateway_smoke.py
 
       - name: Verify dependency and plugin metadata stayed unchanged
         run: git diff --exit-code -- pyproject.toml uv.lock plugin.yaml

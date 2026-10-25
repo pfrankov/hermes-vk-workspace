@@ -86,13 +86,18 @@ Set `HERMES_SOURCE_PATH` to a checkout of the exact revision in CI. CI supplies 
 as `.ci/hermes-agent`. Use the same Python version and locked development tools:
 
 ```sh
-uv sync --locked --group dev
-uv pip install --python .venv/bin/python --editable "$HERMES_SOURCE_PATH"
-uv pip check --python .venv/bin/python
+uv python install 3.14.8
+bash scripts/build-test-env.sh
 uv run --no-sync ruff check .
 uv run --no-sync ruff format --check .
 uv run --no-sync pytest
 ```
+
+The disposable `.venv` must not exist before the build. Hermes PM builds its frozen
+`messaging` + `dev` graph, including upstream overrides. Plugin lock consistency is
+checked separately: runtime tests use the host lock's transitive versions, not a
+synthetic union of conflicting locks. Direct plugin/tool pins must match the host.
+Do not use this test recipe on an operator environment.
 
 Do not run an exact dependency sync between host installation and tests: it removes
 the separately installed Hermes package. Add focused regression coverage for

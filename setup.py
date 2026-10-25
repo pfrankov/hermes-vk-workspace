@@ -5,7 +5,13 @@ from __future__ import annotations
 from collections.abc import Mapping
 from getpass import getpass
 
-from hermes_cli.config import get_env_value, read_raw_config, save_config, save_env_value
+from hermes_cli.config import (
+    get_env_value,
+    read_raw_config,
+    require_env_writable,
+    save_config,
+    save_env_value,
+)
 
 from .config import (
     PLATFORM,
@@ -17,6 +23,7 @@ from .config import (
 )
 
 USERS_ENV = "VK_WORKSPACE_ALLOWED_USERS"
+ALLOW_ALL_ENV = "VK_WORKSPACE_ALLOW_ALL_USERS"
 
 
 def _ask(message: str, *, default: str = "", password: bool = False) -> str:
@@ -48,7 +55,8 @@ def _users(value: str) -> str | None:
     if not value.strip():
         return None
     entries = tuple(dict.fromkeys(identifier(v.strip()) for v in value.split(",") if v.strip()))
-    if not entries or len(entries) > 256 or "*" in entries:
+    # Hermes strips non-ASCII from .env values, which would silently corrupt the allowlist.
+    if not entries or len(entries) > 256 or "*" in entries or not value.isascii():
         raise ConfigError("Enter up to 256 explicit user IDs; open access is not configured here")
     return ",".join(entries)
 
@@ -73,7 +81,8 @@ def _collect() -> tuple[str, str, str | None] | None:
     raw_token = _ask("  Bot API token (leave blank to keep existing)", password=True)
     token = (raw_token or "").strip() if isinstance(raw_token, str) else ""
     token = token or (get_env_value(TOKEN_ENV) or "").strip()
-    if not token or _has_unsafe_characters(token):
+    # Hermes would strip non-ASCII and save a different token than the one entered.
+    if not token or _has_unsafe_characters(token) or not token.isascii():
         _warn("  A valid Bot API token is required; no settings were changed.")
         return None
     raw_users = _ask("  Allowed user IDs (comma-separated; blank keeps current access)", default="")
@@ -99,18 +108,34 @@ def _save_server(url: str) -> None:
     values = platforms.setdefault(PLATFORM, {})
     if not isinstance(values, dict):
         raise ConfigError("Malformed VK Workspace configuration")
-    values["base_url"] = url
+    extra = values.get("extra")
+    if isinstance(extra, dict) and "base_url" in extra:
+        extra["base_url"] = url
+        values.pop("base_url", None)
+    else:
+        values["base_url"] = url
     values["enabled"] = True
     save_config(config)
 
 
 def setup_platform() -> None:
-    """Hermes platform setup_fn: validate inputs, commit URL, verify, then save secrets."""
+    """Preflight writes, verify the effective server, then save access policy and token."""
     print("\n  VK Workspace / VK Teams setup")
     values = _collect()
     if values is None:
         return
     url, token, allowed_users = values
+    updates = [(TOKEN_ENV, token)]
+    if allowed_users is not None:
+        # Close allow-all first so an interrupted save fails closed.
+        updates = [(ALLOW_ALL_ENV, "false"), (USERS_ENV, allowed_users), *updates]
+    try:
+        for key, _value in updates:
+            require_env_writable(key, "set")
+    except ValueError as exc:
+        # Hermes' refusal names the key and managed source, never a value.
+        _warn(f"  {exc} No settings were changed.")
+        return
     try:
         _save_server(url)
         actual = _effective_platform()
@@ -125,13 +150,9 @@ def setup_platform() -> None:
             "token was not changed."
         )
         return
-    save_env_value(TOKEN_ENV, token)
-    if get_env_value(TOKEN_ENV) != token:
-        _warn("  Token could not be saved in this Hermes profile.")
-        return
-    if allowed_users is not None:
-        save_env_value(USERS_ENV, allowed_users)
-        if get_env_value(USERS_ENV) != allowed_users:
-            _warn("  Token saved, but allowed users could not be updated.")
+    for key, value in updates:
+        save_env_value(key, value)
+        if get_env_value(key) != value:
+            _warn("  Credentials or access policy could not be saved; setup was not completed.")
             return
     print("  VK Workspace configured in the current Hermes profile.")
