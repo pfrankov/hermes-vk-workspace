@@ -83,10 +83,11 @@ exactly-once delivery.
 ## Validation
 
 Set `HERMES_SOURCE_PATH` to a checkout of the exact revision in CI. CI supplies it
-as `.ci/hermes-agent`. Use the same Python version and locked development tools:
+as `.ci/hermes-agent`. Use uv 0.13.6 or newer for the Python 3.14.10 download
+catalog, the same Python version and locked development tools:
 
 ```sh
-uv python install 3.14.8
+uv python install 3.14.10
 bash scripts/build-test-env.sh
 uv run --no-sync ruff check .
 uv run --no-sync ruff format --check .
